@@ -1,0 +1,34 @@
+name: 動画づくり
+
+on:
+  schedule:
+    # 日本時間 9:17〜21:17 の2時間おきに、注文があるか見にいく
+    - cron: "17 0-12/2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency: reel
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      WEBAPP_URL: ${{ secrets.WEBAPP_URL }}
+      WEBAPP_KEY: ${{ secrets.WEBAPP_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 注文があるか確認
+        id: check
+        run: python3 src/run_job.py --check
+      - name: 道具を入れる
+        if: steps.check.outputs.has_job == 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg fonts-noto-cjk
+          pip install -q pillow
+      - name: 動画をつくる
+        if: steps.check.outputs.has_job == 'true'
+        run: python3 src/run_job.py
