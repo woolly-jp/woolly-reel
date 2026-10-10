@@ -157,6 +157,9 @@ def overlay(scene, cfg, base=None):
         spaced(d, (W / 2, TEXT_Y), cfg.get("brand", "Woolly"), font(SANS, 28), sub, spacing=14)
         f = fit_font(d, scene["text"], SERIF, 50, W - 200, spacing=4)
         spaced(d, (W / 2, TEXT_Y + 60), scene["text"], f, ink, spacing=4)
+        if scene.get("sub"):  # 商品名の下に添える、気の利いたひとこと
+            f = fit_font(d, scene["sub"], SERIF, 36, W - 240, spacing=5)
+            spaced(d, (W / 2, TEXT_Y + 146), scene["sub"], f, sub, spacing=5)
     elif kind == "panel":    # 商品名・色・価格の帯(写真は帯の上に収める)
         d = ImageDraw.Draw(layer)
         top = PANEL_TOP
@@ -204,7 +207,7 @@ def scenes_for(cfg):
     whole = cfg["product_image"]
     close = cfg.get("detail_image") or whole          # 寄りの写真(なければ全体)
     extra = cfg.get("extra_image") or whole           # 別カットの写真(なければ全体)
-    name = {"overlay": "caption", "text": cfg["name"]}
+    name = {"overlay": "caption", "text": cfg["name"], "sub": cfg.get("tagline")}
     if t in ("slide", "zoom"):
         last = {"overlay": "panel"} if t == "slide" else name
         # 2枚目には、素材やつくりの特徴のひとこと(あれば)を重ねる

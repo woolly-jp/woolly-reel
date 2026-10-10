@@ -75,6 +75,7 @@ const CONF_ROWS = [
   ['AIモデル', 'claude-haiku-4-5-20251001', '文章づくりに使うモデル'],
   ['Instagram API版', 'v26.0', '通常は変更不要'],
   ['確認画面URL', '', 'ウェブアプリとして公開したあとのURL(…/exec)'],
+  ['ハッシュタグの上限', '5', 'Instagramで付けられるハッシュタグの数。超えた分は自動で削る'],
   ['文章の方針', 'キャプションの本文は4〜6文。写真の場面から入り、素材、つくり、使う場面を具体的に伝える。商品説明にある事実を2〜3つ入れる。',
     'AIへの注文。長さ、内容、言い回しを、ここを書き換えるだけで調整できる'],
 ];
@@ -339,6 +340,16 @@ function webImage_(url) {
 
 /* ───────── 文章をつくる(AI) ───────── */
 
+function tagLimit_(c) { return Math.max(0, parseInt(c['ハッシュタグの上限'], 10) || 5); }
+function hashtags_(text) { return String(text).match(/[#＃][^\s#＃]+/g) || []; }
+
+/** ハッシュタグが上限を超えていたら、後ろのものから削る */
+function limitHashtags_(text, limit) {
+  let n = 0;
+  return String(text).replace(/[ \t]*[#＃][^\s#＃]+/g, function (m) { return ++n <= limit ? m : ''; })
+    .replace(/[ \t]+$/gm, '').replace(/\n{3,}/g, '\n\n').trim();
+}
+
 function ngHits_(text) {
   return NG.filter(function (re) { return re.test(text); }).map(function (re) { return String(re); });
 }
@@ -368,7 +379,7 @@ const RULES = [
   '・「日本一」「最高品質」など根拠のない最上級は使わない。',
   '・下の「事実」に書かれていない効果、数字、産地、素材は書かない。価格は書かない。',
   '・絵文字は使っても1〜2個まで。',
-  '・caption の構成: 1行目で場面や季節の実感 → 本文(長さと内容は下の「文章の方針」に従う) → 空行 → 商品名 → 「プロフィールのリンクからご覧いただけます」 → 空行 → ハッシュタグ5〜8個(基本ハッシュタグを含める)。',
+  '・caption の構成: 1行目で場面や季節の実感 → 本文(長さと内容は下の「文章の方針」に従う) → 空行 → 商品名 → 「プロフィールのリンクからご覧いただけます」 → 空行 → ハッシュタグ(基本ハッシュタグを先に入れ、合計は「ハッシュタグの上限」の数まで)。',
 ].join('\n');
 
 /**
@@ -385,9 +396,11 @@ function writeText_(c, job) {
     '柱: ' + job.pillar,
     '今日: ' + today_(),
     '基本ハッシュタグ: ' + c['基本ハッシュタグ'],
+    'ハッシュタグの上限: ' + tagLimit_(c) + '個',
   ].filter(String).join('\n');
 
-  const want = { caption: 'Instagramのキャプション' };
+  const want = { caption: 'Instagramのキャプション',
+    tagline: '動画の中で商品名のすぐ下に小さく添える、気の利いた短いフレーズ(20文字以内、句点なし。商品の魅力を余韻のある言葉で。事実と写真から外れない)' };
   if (job.template === 'notice' && !job.news) {
     want.notice_title = '画面に大きく出す見出し(12文字以内)';
     want.notice_lines = '見出しの下に出す2行(各16文字以内)の配列。テーマの事実だけを書く';
@@ -432,6 +445,7 @@ function writeText_(c, job) {
     pick: 1,
     copy: 'あたたかく、心地よく。',
     point: '',
+    tagline: '',
     caption: (name ? name + '\n' : '') + 'プロフィールのリンクからご覧いただけます\n\n' + c['基本ハッシュタグ'],
     notice_title: job.fact ? String(job.factTheme || 'Woollyの話').slice(0, 12) : '',
     notice_lines: job.fact ? [String(job.fact).slice(0, 16), String(job.fact).slice(16, 32)].filter(String) : [],
@@ -440,7 +454,7 @@ function writeText_(c, job) {
   try {
     out = claude_(c, content);
     if (out) {
-      const check = function (o) { return ngHits_([o.caption, o.copy, o.point, o.notice_title, (o.notice_lines || []).join(' ')].join(' ')); };
+      const check = function (o) { return ngHits_([o.caption, o.copy, o.point, o.tagline, o.notice_title, (o.notice_lines || []).join(' ')].join(' ')); };
       if (check(out).length) {
         content.push({ type: 'text', text: '前回の案には禁止表現が含まれていました。禁止表現を一切使わずに書き直してください。' });
         out = claude_(c, content);
@@ -455,6 +469,7 @@ function writeText_(c, job) {
   }
   const r = Object.assign({}, fallback, out || {});
   r.pick = Math.min(Math.max(1, parseInt(r.pick, 10) || 1), Math.max(1, cands.length));
+  r.caption = limitHashtags_(String(r.caption || ''), tagLimit_(c));
   r.note = note;
   return r;
 }
@@ -540,6 +555,7 @@ function createJob_(opt) {
     template: job.template, brand: c['ブランド名'] || 'Woolly',
     name: p['表示名'], variant: p['色・種類'], price: p['価格'], copy: text.copy,
     point: (job.template === 'slide' || job.template === 'zoom') ? String(text.point || '') : '',
+    tagline: String(text.tagline || ''),
     ai_image: wearFile ? !/^実写/.test(wearFile.getName()) : false,
   };
   const files = { product_image: { url: p['全体写真URL'] } };
@@ -729,6 +745,10 @@ function publish(token, caption) {
     if (j.r['状態'] !== ST.review) return { ok: false, message: 'この投稿は「' + j.r['状態'] + '」です' };
     const hits = ngHits_(caption);
     if (hits.length) return { ok: false, message: 'キャプションに使えない表現があります。直してからもう一度押してください: ' + hits.join(' ') };
+    const lim = tagLimit_(conf_());
+    if (hashtags_(caption).length > lim) {
+      return { ok: false, message: 'ハッシュタグは' + lim + '個までです(今は' + hashtags_(caption).length + '個)。減らしてからもう一度押してください' };
+    }
     j.r['状態'] = ST.posting;
     j.r['キャプション'] = caption;
     saveRow_(j.t, j.r);
