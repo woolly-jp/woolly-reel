@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Woolly リール動画メーカー(4テンプレート / 素材2枚 / 5.5秒)
+"""Woolly リール動画メーカー(4テンプレート / 素材3枚 / 10秒)
 
 テンプレート: slide(スライド型) / zoom(ゆっくりズーム型) /
               detail(ディテール型) / notice(告知型)
@@ -14,7 +14,7 @@ import json
 import subprocess
 import sys
 
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageStat
 
 W, H, FPS = 1080, 1920, 30
 
@@ -37,13 +37,19 @@ def ease(t):
     return t * t * (3 - 2 * t)
 
 
-def cover(img, zoom):
-    """画像を縦長の画面いっぱいに切り出す。zoom=1.0 でちょうど、1.06 で少し寄る"""
+# 文字を置く高さ。Instagramのリール画面で、下のアカウント名やキャプションに隠れない位置
+TEXT_Y = 1300
+PANEL_TOP = 1120   # 商品名・価格の帯が始まる高さ(その上に写真を収める)
+LABEL_Y = 270      # 「イメージ画像」の札の高さ(上の画面部品に隠れない位置)
+
+
+def cover(img, zoom, h=H):
+    """画像を枠(幅W×高さh)いっぱいに切り出す。zoom=1.0 でちょうど、1.06 で少し寄る"""
     iw, ih = img.size
-    scale = max(W / iw, H / ih) * zoom
-    cw, ch = W / scale, H / scale
+    scale = max(W / iw, h / ih) * zoom
+    cw, ch = W / scale, h / scale
     left, top = (iw - cw) / 2, (ih - ch) / 2
-    return img.resize((W, H), Image.LANCZOS, box=(left, top, left + cw, top + ch))
+    return img.resize((W, h), Image.LANCZOS, box=(left, top, left + cw, top + ch))
 
 
 def spaced(draw, xy, text, fnt, fill, spacing=0, anchor_center=True):
@@ -101,14 +107,29 @@ def load(scene, cfg):
     return ImageOps.exif_transpose(Image.open(path)).convert("RGB")
 
 
-def shade(layer, height=700, strength=110):
-    """文字を読みやすくするため、下側だけうっすら暗くする"""
+def wash(layer, top, tone, strength):
+    """文字の下地。top から300pxかけて濃くなり、そのまま下まで続く"""
     sh = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     sd = ImageDraw.Draw(sh)
-    for i in range(height):
-        a = int(strength * (i / height) ** 1.6)
-        sd.line([(0, H - height + i), (W, H - height + i)], fill=(30, 28, 26, a))
+    for y in range(max(0, top), H):
+        sd.line([(0, y), (W, y)], fill=tone + (int(strength * ease((y - top) / 300)),))
     return Image.alpha_composite(layer, sh)
+
+
+def text_style(layer, base):
+    """写真の明るさを見て、文字の色と下地を決める。
+    明るい写真 → 濃い文字 + 生成りの下地 / 暗い写真・動画 → 白い文字 + 暗い下地"""
+    lum, below = 90.0, 0.0
+    if base is not None:
+        mean = lambda box: ImageStat.Stat(base.crop(box).convert("L")).mean[0]
+        lum = mean((60, TEXT_Y - 40, W - 60, TEXT_Y + 170))   # 文字が重なるあたり
+        below = mean((0, TEXT_Y + 170, W, H))                 # その下(白い背景かどうか)
+    if lum > 150 or below > 185:
+        # 白背景に濃い色の商品が重なる場合は、下地を濃くして読みやすくする
+        strength = 175 if lum > 150 else 220
+        return wash(layer, TEXT_Y - 240, KINARI, strength), CHARCOAL + (255,), SOFT_GRAY + (255,)
+    return (wash(layer, TEXT_Y - 240, (30, 28, 26), int(95 + lum * 0.5)),
+            (255, 252, 246, 255), (255, 252, 246, 220))
 
 
 def ai_label(d):
@@ -116,41 +137,39 @@ def ai_label(d):
     f = font(SANS, 26)
     label = "イメージ画像"
     tw = d.textlength(label, font=f)
-    x0, y0 = W - tw - 84, 88
+    x0, y0 = W - tw - 84, LABEL_Y
     d.rounded_rectangle([x0, y0, W - 40, y0 + 52], radius=26, fill=(40, 38, 36, 120))
     d.text((x0 + 22, y0 + 6), label, font=f, fill=(255, 255, 255, 240))
 
 
-def overlay(scene, cfg):
-    """1場面に重ねる文字の層をつくる"""
+def overlay(scene, cfg, base=None):
+    """1場面に重ねる文字の層をつくる。base は文字が重なる写真(明るさを見るため)"""
     layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     kind = scene.get("overlay")
-    white = (255, 252, 246, 255)
     if kind == "copy":      # 大きめのひとこと
-        layer = shade(layer)
+        layer, ink, sub = text_style(layer, base)
         d = ImageDraw.Draw(layer)
         f = fit_font(d, scene["text"], SERIF, 68, W - 200, spacing=8)
-        spaced(d, (W / 2, H - 470), scene["text"], f, white, spacing=8)
+        spaced(d, (W / 2, TEXT_Y + 20), scene["text"], f, ink, spacing=8)
     elif kind == "caption":  # 小さめの商品名
-        layer = shade(layer, 560, 120)
+        layer, ink, sub = text_style(layer, base)
         d = ImageDraw.Draw(layer)
-        spaced(d, (W / 2, H - 430), cfg.get("brand", "Woolly"), font(SANS, 28),
-               (255, 252, 246, 215), spacing=14)
+        spaced(d, (W / 2, TEXT_Y), cfg.get("brand", "Woolly"), font(SANS, 28), sub, spacing=14)
         f = fit_font(d, scene["text"], SERIF, 50, W - 200, spacing=4)
-        spaced(d, (W / 2, H - 370), scene["text"], f, white, spacing=4)
-    elif kind == "panel":    # 商品名・色・価格の帯
+        spaced(d, (W / 2, TEXT_Y + 60), scene["text"], f, ink, spacing=4)
+    elif kind == "panel":    # 商品名・色・価格の帯(写真は帯の上に収める)
         d = ImageDraw.Draw(layer)
-        top = H - 520
+        top = PANEL_TOP
         d.rectangle([0, top, W, H], fill=KINARI + (255,))
-        spaced(d, (W / 2, top + 62), cfg.get("brand", "Woolly"), font(SANS, 30),
+        spaced(d, (W / 2, top + 54), cfg.get("brand", "Woolly"), font(SANS, 30),
                SOFT_GRAY + (255,), spacing=14)
-        d.line([(W / 2 - 36, top + 124), (W / 2 + 36, top + 124)], fill=SOFT_GRAY + (255,), width=2)
+        d.line([(W / 2 - 36, top + 114), (W / 2 + 36, top + 114)], fill=SOFT_GRAY + (255,), width=2)
         f = fit_font(d, cfg["name"], SERIF, 58, W - 160, spacing=4)
-        spaced(d, (W / 2, top + 160), cfg["name"], f, CHARCOAL + (255,), spacing=4)
-        y = top + 258
+        spaced(d, (W / 2, top + 148), cfg["name"], f, CHARCOAL + (255,), spacing=4)
+        y = top + 244
         if cfg.get("variant"):
             spaced(d, (W / 2, y), cfg["variant"], font(SANS, 34), SOFT_GRAY + (255,), spacing=6)
-            y += 74
+            y += 72
         if cfg.get("price"):
             spaced(d, (W / 2, y), cfg["price"], font(SERIF, 50), CHARCOAL + (255,), spacing=3)
     if scene.get("ai_label"):
@@ -179,21 +198,24 @@ def card(cfg):
 
 
 def scenes_for(cfg):
-    """テンプレートごとの2場面の中身"""
+    """テンプレートごとの3場面の中身。どれも最後は実物の商品写真で終わる"""
     t = cfg.get("template", "slide")
     ai = cfg.get("ai_image", True)
-    if t == "slide":
+    whole = cfg["product_image"]
+    close = cfg.get("detail_image") or whole          # 寄りの写真(なければ全体)
+    extra = cfg.get("extra_image") or whole           # 別カットの写真(なければ全体)
+    name = {"overlay": "caption", "text": cfg["name"]}
+    if t in ("slide", "zoom"):
+        last = {"overlay": "panel"} if t == "slide" else name
         return [{"image": cfg["wear_image"], "overlay": "copy", "text": cfg["copy"], "ai_label": ai},
-                {"image": cfg["product_image"], "overlay": "panel"}]
-    if t == "zoom":
-        return [{"image": cfg["wear_image"], "overlay": "copy", "text": cfg["copy"], "ai_label": ai},
-                {"image": cfg["product_image"], "overlay": "caption", "text": cfg["name"]}]
+                {"image": close},
+                dict(image=whole, **last)]
     if t == "detail":
-        return [{"image": cfg["product_image"], "overlay": "caption", "text": cfg["name"]},
-                {"image": cfg["detail_image"], "overlay": "copy", "text": cfg["copy"]}]
+        return [dict(image=whole, **name),
+                {"image": close, "overlay": "copy", "text": cfg["copy"]},
+                {"image": extra, "overlay": "panel"}]
     if t == "notice":
-        return [{"card": True},
-                {"image": cfg["product_image"], "overlay": "caption", "text": cfg["name"]}]
+        return [{"card": True}, {"image": close}, dict(image=whole, **name)]
     sys.exit(f"知らないテンプレートです: {t}")
 
 
@@ -206,16 +228,26 @@ def with_alpha(layer, alpha):
 
 
 def render(cfg, out_path):
-    hold = float(cfg.get("seconds_per_image", 2.75))  # 1枚あたりの秒数
+    sc = scenes_for(cfg)
+    hold = float(cfg.get("seconds_per_image", 10 / len(sc)))  # 1枚あたりの秒数(全体で約10秒)
     fade = float(cfg.get("crossfade", 0.6))            # 切り替えの秒数
     default_zoom = 0.10 if cfg.get("template") == "zoom" else 0.06
     zoom_amt = float(cfg.get("zoom", default_zoom))    # ズームの量(0.06 = 6%)
-    total = hold * 2
+    total = hold * len(sc)
     n = int(round(total * FPS))
 
-    sc = scenes_for(cfg)
     imgs = [load(s, cfg) for s in sc]
-    ovs = [overlay(s, cfg) for s in sc]
+
+    def frame_of(k, z):
+        """k枚目の写真を画面に置く。帯のある場面では、帯の上の枠に収める"""
+        if sc[k].get("overlay") == "panel":
+            canvas = Image.new("RGB", (W, H), KINARI)
+            canvas.paste(cover(imgs[k], z, PANEL_TOP), (0, 0))
+            return canvas
+        return cover(imgs[k], z)
+
+    ovs = [overlay(s, cfg, None if isinstance(imgs[k], Clip) else frame_of(k, 1.0))
+           for k, s in enumerate(sc)]
 
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error",
@@ -241,17 +273,18 @@ def render(cfg, out_path):
             base = imgs[k].next().convert("RGBA")
         else:
             z = 1.0 if sc[k].get("card") else 1 + zoom_amt * (local_t / (hold + fade / 2))
-            base = cover(imgs[k], z).convert("RGBA")
+            base = frame_of(k, z).convert("RGBA")
         return Image.alpha_composite(base, with_alpha(ovs[k], ease((local_t - text_delay) / 0.6)))
 
-    switch = hold - fade / 2  # クロスフェードの開始時刻
+    # k枚目が出始める時刻(前の写真とのクロスフェードの開始)
+    starts = [0.0] + [k * hold - fade / 2 for k in range(1, len(sc))]
     for i in range(n):
         t = i / FPS
-        mix = ease((t - switch) / fade)  # 0 = 1枚目、1 = 2枚目
-        frame = shot(0, t, 0.35) if mix < 1 else None
-        if mix > 0:
-            b = shot(1, t - switch, fade * 0.6)
-            frame = b if frame is None else Image.blend(frame, b, mix)
+        k = max(j for j, st in enumerate(starts) if t >= st)  # いま出始めている、いちばん新しい写真
+        mix = ease((t - starts[k]) / fade) if k else 1.0       # 0 = 前の写真、1 = 今の写真
+        frame = shot(k, t - starts[k], 0.35 if k == 0 else fade * 0.6)
+        if mix < 1:
+            frame = Image.blend(shot(k - 1, t - starts[k - 1], 0), frame, mix)
         # 最初と最後をわずかにフェード
         edge = min(ease(t / 0.3), ease((total - t) / 0.3))
         rgb = frame.convert("RGB")

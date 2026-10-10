@@ -18,7 +18,7 @@ const SHEETS = { conf: '設定', prod: '商品', log: '記録', facts: '素材�
 const HEAD = {
   conf: ['項目', '値', '説明'],
   prod: ['handle', '商品名', 'フォルダ名', 'フォルダID', '表示名', '色・種類', '価格', '在庫', '季節',
-    '寄りの写真番号', '最終投稿日', '全体写真URL', '写真URL一覧', '商品ページURL', '説明'],
+    '寄りの写真番号', '最終投稿日', '全体写真URL', '写真URL一覧', '商品ページURL', '説明', '着用の写真番号'],
   log: ['ID', '作成日時', '柱', 'テンプレート', 'handle', '商品名', '状態', '動画URL', 'キャプション',
     '設定JSON', '素材ID', '確認URL', '通知日時', '投稿URL', 'メモ'],
   facts: ['テーマ', '事実(サイトに書いてある内容)', '使用日'],
@@ -63,6 +63,15 @@ function saveRow_(t, o) {
 function addRow_(key, o) {
   ss_().getSheetByName(SHEETS[key])
     .appendRow(HEAD[key].map(function (h) { return o[h] === undefined ? '' : o[h]; }));
+}
+
+/** プログラムの更新で増えた列を、既存のシートの右端に足す */
+function ensureColumns_(key) {
+  const sh = ss_().getSheetByName(SHEETS[key]);
+  const head = sh.getDataRange().getValues()[0];
+  HEAD[key].forEach(function (h) {
+    if (head.indexOf(h) < 0) { head.push(h); sh.getRange(1, head.length).setValue(h); }
+  });
 }
 
 function conf_() {
@@ -189,6 +198,7 @@ function syncProducts() {
     if (ps.length < 250) break;
   }
   const names = folderNames_(all);
+  ensureColumns_('prod');
   const t = table_('prod');
   const root = DriveApp.getFolderById(props_().getProperty('ROOT_ID'));
   const byHandle = {};
@@ -198,7 +208,7 @@ function syncProducts() {
     const info = names[p.handle];
     let r = byHandle[p.handle];
     const isNew = !r;
-    if (isNew) r = { handle: p.handle, '季節': guessSeason_(p.title), '寄りの写真番号': 2, '最終投稿日': '' };
+    if (isNew) r = { handle: p.handle, '季節': guessSeason_(p.title), '寄りの写真番号': 2, '最終投稿日': '', '着用の写真番号': '' };
     if (!r['フォルダID']) {
       const f = ensureSub_(root, info.folder);
       Object.keys(SUB).forEach(function (k) { ensureSub_(f, SUB[k]); });
@@ -259,6 +269,15 @@ function pickWear_(folderId, exclude) {
   return { cands: unused.slice(0, 6) };
 }
 
+function photos_(r) { return String(r['写真URL一覧'] || '').split('\n').filter(String); }
+
+/** 「商品」シートの「着用の写真番号」で指定された、サイト上の着用写真のURL(なければ空) */
+function siteWearUrl_(r) {
+  const list = photos_(r);
+  const n = parseInt(r['着用の写真番号'], 10);
+  return n >= 1 && n <= list.length ? list[n - 1] : '';
+}
+
 function seasonScore_(s) {
   const m = Number(Utilities.formatDate(now_(), 'Asia/Tokyo', 'M'));
   const cold = m >= 10 || m <= 3;
@@ -290,7 +309,7 @@ function driveImage_(file) {
       return { media_type: type.split(';')[0], data: Utilities.base64Encode(res.getContent()) };
     }
   } catch (e) { /* 下の方法に切り替える */ }
-  if (file.getSize() < 4 * 1024 * 1024) {
+  if (/^image\//.test(file.getMimeType()) && file.getSize() < 4 * 1024 * 1024) {
     return { media_type: file.getMimeType(), data: Utilities.base64Encode(file.getBlob().getBytes()) };
   }
   return null;
@@ -364,23 +383,34 @@ function writeText_(c, job) {
   }
   const content = [];
   const cands = job.cands || [];
+  const show = function (label, img) {
+    if (!img) return;
+    content.push({ type: 'text', text: label + ':' });
+    content.push({ type: 'image', source: { type: 'base64', media_type: img.media_type, data: img.data } });
+  };
+  const onCopy = '(ひとことが重なる写真)';
+  // 動画に使う写真そのものを見せて、写真に合った文章を書いてもらう
   if (cands.length) {
     want.pick = '実物写真と色味・明るさが最も近く、落ち着いた自然光のトーンに合う候補の番号(1始まり)';
-    const base = p && webImage_(p['全体写真URL']);
-    if (base) {
-      content.push({ type: 'text', text: '実物写真:' });
-      content.push({ type: 'image', source: { type: 'base64', media_type: base.media_type, data: base.data } });
-    }
-    cands.forEach(function (f, i) {
-      const img = driveImage_(f);
-      if (!img) return;
-      content.push({ type: 'text', text: '候補' + (i + 1) + ':' });
-      content.push({ type: 'image', source: { type: 'base64', media_type: img.media_type, data: img.data } });
-    });
+    cands.forEach(function (f, i) { show('着用シーンの候補' + (i + 1), driveImage_(f)); });
+  } else if (job.wearFile) {
+    show('着用シーン' + onCopy, driveImage_(job.wearFile));
+  } else if (job.wearUrl) {
+    show('着用シーン' + onCopy, webImage_(job.wearUrl));
   }
+  if (p) show('実物写真', webImage_(p['全体写真URL']));
+  if (job.detailUrl) show('寄りの写真' + (job.template === 'detail' ? onCopy : ''), webImage_(job.detailUrl));
+  if (job.extraUrl) show('別カットの写真', webImage_(job.extraUrl));
+  const photoRules = content.length ? [
+    '',
+    '【写真について】',
+    '・上の写真が動画に使われます(1本10秒、写真3枚)。',
+    '・ひとこと(copy)は「ひとことが重なる写真」に写っているもの、光、場面、質感に合わせる。候補が複数あるときは、選んだ候補に合わせる。',
+    '・キャプションも写真の内容に沿わせる。写真に写っていないもの(人、場所、季節の小物など)を、写っているかのように書かない。',
+  ].join('\n') : '';
   content.push({
     type: 'text',
-    text: RULES + '\n\n【事実】\n' + facts + '\n\n次のキーを持つJSONだけを返してください:\n' + JSON.stringify(want, null, 1),
+    text: RULES + photoRules + '\n\n【事実】\n' + facts + '\n\n次のキーを持つJSONだけを返してください:\n' + JSON.stringify(want, null, 1),
   });
 
   const name = p ? p['表示名'] : '';
@@ -426,6 +456,7 @@ function recentHandles_() {
  * opt: { pillarIdx, excludeMaterials[], avoidHandles[], news{row,title,lines,related}, memo }
  */
 function createJob_(opt) {
+  ensureColumns_('prod');
   const c = conf_();
   const pillar = PILLARS[opt.pillarIdx % PILLARS.length];
   const excl = opt.excludeMaterials || [];
@@ -444,11 +475,16 @@ function createJob_(opt) {
       wear = pickWear_(ranked[i]['フォルダID'], excl);
       if (wear) job.product = ranked[i];
     }
-    if (!wear) {
+    for (let i = 0; !wear && !job.wearUrl && i < ranked.length; i++) {
+      // フォルダに素材がなければ、サイトの商品ページにある着用写真を使う
+      job.wearUrl = siteWearUrl_(ranked[i]);
+      if (job.wearUrl) { job.product = ranked[i]; job.memo = (job.memo + ' サイトの着用写真を使用').trim(); }
+    }
+    if (!wear && !job.wearUrl) {
       // 着用素材がひとつもない → 実物写真だけで作れるディテール型に切り替えて知らせる
       job.template = 'detail';
       job.memo = (job.memo + ' 着用素材がないためディテール型に変更').trim();
-      notify_('素材がありません', '「未使用」フォルダに着用素材がないため、今回は実物写真だけで作りました。\n着用の画像や動画を追加してください。\n' +
+      notify_('素材がありません', '「未使用」フォルダに着用素材がないため、今回は実物写真だけで作りました。\n着用の画像や動画を追加するか、「商品」シートの「着用の写真番号」を入れてください。\n' +
         DriveApp.getFolderById(props_().getProperty('ROOT_ID')).getUrl(), false);
     }
   }
@@ -471,12 +507,18 @@ function createJob_(opt) {
     }
   }
 
+  const p = job.product;
+  const imgs = photos_(p);
+  const detailNo = Math.min(Math.max(1, parseInt(p['寄りの写真番号'], 10) || 2), imgs.length);
+  // 3枚構成: 寄りの写真は全テンプレートで使う。ディテール型は、別カットをもう1枚使う
+  job.detailUrl = imgs[detailNo - 1] || imgs[0];
+  if (job.template === 'detail') {
+    job.extraUrl = imgs.filter(function (u) { return u !== imgs[0] && u !== job.detailUrl; })[0] || imgs[0];
+  }
   job.cands = wear && wear.cands ? wear.cands : [];
+  job.wearFile = wear && wear.file ? wear.file : null;
   const text = writeText_(c, job);
   const wearFile = wear ? (wear.file || wear.cands[text.pick - 1] || wear.cands[0]) : null;
-  const p = job.product;
-  const imgs = String(p['写真URL一覧']).split('\n').filter(String);
-  const detailNo = Math.min(Math.max(1, parseInt(p['寄りの写真番号'], 10) || 2), imgs.length);
 
   const config = {
     template: job.template, brand: c['ブランド名'] || 'Woolly',
@@ -485,7 +527,9 @@ function createJob_(opt) {
   };
   const files = { product_image: { url: p['全体写真URL'] } };
   if (wearFile) files.wear_image = { drive_id: wearFile.getId() };
-  if (job.template === 'detail') files.detail_image = { url: imgs[detailNo - 1] || imgs[0] };
+  else if (job.wearUrl) files.wear_image = { url: job.wearUrl };
+  files.detail_image = { url: job.detailUrl };
+  if (job.extraUrl) files.extra_image = { url: job.extraUrl };
   if (job.template === 'notice') {
     config.notice_title = job.news ? job.news.title : text.notice_title;
     config.notice_lines = [].concat(job.news ? job.news.lines : (text.notice_lines || [])).map(String).slice(0, 3);
@@ -803,6 +847,37 @@ function testInstagram() {
 function testAI() {
   const out = claude_(conf_(), [{ type: 'text', text: '次のJSONだけを返してください: {"ok": true}' }]);
   Logger.log(out ? 'AIに接続できました' : 'ANTHROPIC_API_KEY が未設定です');
+}
+
+/**
+ * サイトの商品写真をAIが見て、「着用の写真番号」が空の商品に番号を入れる。
+ * 人が身につけている写真がない商品は、空のままにする。入った番号は「商品」シートで直せる。
+ */
+function suggestWearPhotos() {
+  ensureColumns_('prod');
+  const c = conf_();
+  const t = table_('prod');
+  t.rows.forEach(function (r) {
+    if (r['着用の写真番号'] !== '' && r['着用の写真番号'] !== undefined) return;
+    const list = photos_(r).slice(0, 6);
+    const content = [];
+    list.forEach(function (u, i) {
+      const img = webImage_(u);
+      if (!img) return;
+      content.push({ type: 'text', text: '写真' + (i + 1) + ':' });
+      content.push({ type: 'image', source: { type: 'base64', media_type: img.media_type, data: img.data } });
+    });
+    if (!content.length) return;
+    content.push({ type: 'text', text: '人が商品を身につけている、または使っている場面の写真のうち、縦長の動画の最初の1枚に最も向くものの番号を選んでください。' +
+      '該当する写真がなければ0。次のJSONだけを返してください: {"n": 番号}' });
+    try {
+      const out = claude_(c, content);
+      if (!out) { Logger.log('ANTHROPIC_API_KEY が未設定です'); return; }
+      const n = parseInt(out.n, 10);
+      if (n >= 1 && n <= list.length) { r['着用の写真番号'] = n; saveRow_(t, r); }
+      Logger.log(r['商品名'] + ': ' + (n >= 1 ? n + '番' : '着用写真なし'));
+    } catch (e) { Logger.log(r['商品名'] + ': 判定できませんでした(' + e.message + ')'); }
+  });
 }
 
 /** メールが届くか確かめる */
