@@ -14,7 +14,7 @@ import json
 import subprocess
 import sys
 
-from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageStat
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps, ImageStat
 
 W, H, FPS = 1080, 1920, 30
 
@@ -116,20 +116,38 @@ def wash(layer, top, tone, strength):
     return Image.alpha_composite(layer, sh)
 
 
-def text_style(layer, base):
-    """写真の明るさを見て、文字の色と下地を決める。
+def plate(layer, y0, y1, strength):
+    """文字のうしろに敷く、ふちをぼかした生成りの下地。商品を隠しすぎないよう、文字のまわりだけに置く"""
+    mask = Image.new("L", (W, H), 0)
+    ImageDraw.Draw(mask).rounded_rectangle([56, y0, W - 56, y1], radius=44, fill=strength)
+    mask = mask.filter(ImageFilter.GaussianBlur(26))
+    sheet = Image.new("RGBA", (W, H), KINARI + (0,))
+    sheet.putalpha(mask)
+    return Image.alpha_composite(layer, sheet)
+
+
+def text_style(layer, base, y0, y1):
+    """写真の明るさを見て、文字の色と下地を決める(y0〜y1 が文字の範囲)。
     明るい写真 → 濃い文字 + 生成りの下地 / 暗い写真・動画 → 白い文字 + 暗い下地"""
     lum, below = 90.0, 0.0
     if base is not None:
         mean = lambda box: ImageStat.Stat(base.crop(box).convert("L")).mean[0]
-        lum = mean((60, TEXT_Y - 40, W - 60, TEXT_Y + 170))   # 文字が重なるあたり
-        below = mean((0, TEXT_Y + 170, W, H))                 # その下(白い背景かどうか)
+        lum = mean((60, y0 - 20, W - 60, y1 + 20))    # 文字が重なるあたり
+        below = mean((0, min(y1 + 20, H - 10), W, H))  # その下(白い背景かどうか)
     if lum > 150 or below > 185:
         # 白背景に濃い色の商品が重なる場合は、下地を濃くして読みやすくする
-        strength = 175 if lum > 150 else 220
-        return wash(layer, TEXT_Y - 240, KINARI, strength), CHARCOAL + (255,), SOFT_GRAY + (255,)
-    return (wash(layer, TEXT_Y - 240, (30, 28, 26), int(95 + lum * 0.5)),
-            (255, 252, 246, 255), (255, 252, 246, 220))
+        strength = 200 if lum > 150 else 232
+        return (plate(layer, y0 - 64, y1 + 56, strength),
+                CHARCOAL + (255,), (96, 91, 86, 255))
+    return (wash(layer, y0 - 240, (30, 28, 26), int(95 + lum * 0.5)),
+            (255, 252, 246, 255), (255, 252, 246, 225))
+
+
+def clean_lines(v):
+    """小さく添える文章(2〜3行)を、行のリストにそろえる"""
+    if isinstance(v, str):
+        v = v.split("\n")
+    return [str(x).strip() for x in (v or []) if str(x).strip()][:3]
 
 
 def ai_label(d):
@@ -146,13 +164,20 @@ def overlay(scene, cfg, base=None):
     """1場面に重ねる文字の層をつくる。base は文字が重なる写真(明るさを見るため)"""
     layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     kind = scene.get("overlay")
-    if kind == "copy":      # 大きめのひとこと
-        layer, ink, sub = text_style(layer, base)
+    if kind == "copy":      # 大きめのひとこと + 小さく添える2〜3行
+        lines = clean_lines(scene.get("lines"))
+        top = TEXT_Y - 44 * len(lines)          # 行が増えるぶん、全体を上へ
+        bottom = top + 100 + (36 + 58 * len(lines) if lines else 0)
+        layer, ink, sub = text_style(layer, base, top, bottom)
         d = ImageDraw.Draw(layer)
         f = fit_font(d, scene["text"], SERIF, 68, W - 200, spacing=8)
-        spaced(d, (W / 2, TEXT_Y + 20), scene["text"], f, ink, spacing=8)
+        spaced(d, (W / 2, top + 14), scene["text"], f, ink, spacing=8)
+        for i, line in enumerate(lines):
+            f = fit_font(d, line, SERIF, 35, W - 220, spacing=4)
+            spaced(d, (W / 2, top + 132 + 58 * i), line, f, sub, spacing=4)
     elif kind == "caption":  # 小さめの商品名
-        layer, ink, sub = text_style(layer, base)
+        bottom = TEXT_Y + 124 + (70 if scene.get("sub") else 0)
+        layer, ink, sub = text_style(layer, base, TEXT_Y, bottom)
         d = ImageDraw.Draw(layer)
         spaced(d, (W / 2, TEXT_Y), cfg.get("brand", "Woolly"), font(SANS, 28), sub, spacing=14)
         f = fit_font(d, scene["text"], SERIF, 50, W - 200, spacing=4)
@@ -213,13 +238,14 @@ def scenes_for(cfg):
         # 2枚目には、素材やつくりの特徴のひとこと(あれば)を重ねる
         middle = {"image": close}
         if cfg.get("point"):
-            middle.update(overlay="copy", text=cfg["point"])
-        return [{"image": cfg["wear_image"], "overlay": "copy", "text": cfg["copy"], "ai_label": ai},
+            middle.update(overlay="copy", text=cfg["point"], lines=cfg.get("point_lines"))
+        return [{"image": cfg["wear_image"], "overlay": "copy", "text": cfg["copy"],
+                 "lines": cfg.get("copy_lines"), "ai_label": ai},
                 middle,
                 dict(image=whole, **last)]
     if t == "detail":
         return [dict(image=whole, **name),
-                {"image": close, "overlay": "copy", "text": cfg["copy"]},
+                {"image": close, "overlay": "copy", "text": cfg["copy"], "lines": cfg.get("copy_lines")},
                 {"image": extra, "overlay": "panel"}]
     if t == "notice":
         return [{"card": True}, {"image": close}, dict(image=whole, **name)]

@@ -350,6 +350,12 @@ function limitHashtags_(text, limit) {
     .replace(/[ \t]+$/gm, '').replace(/\n{3,}/g, '\n\n').trim();
 }
 
+/** AIが返した2〜3行を、行の配列にそろえる */
+function lines_(v) {
+  if (typeof v === 'string') v = v.split('\n');
+  return (Array.isArray(v) ? v : []).map(function (x) { return String(x).trim(); }).filter(String).slice(0, 3);
+}
+
 function ngHits_(text) {
   return NG.filter(function (re) { return re.test(text); }).map(function (re) { return String(re); });
 }
@@ -406,7 +412,11 @@ function writeText_(c, job) {
     want.notice_lines = '見出しの下に出す2行(各16文字以内)の配列。テーマの事実だけを書く';
   } else if (job.template !== 'notice') {
     want.copy = '動画に重ねるひとこと(15文字以内、句点で終える)';
-    if (job.template !== 'detail') want.point = '2枚目の寄りの写真に重ねる、素材やつくりの特徴のひとこと(18文字以内、句点なし、事実にあることだけ)';
+    want.copy_lines = 'ひとことのすぐ下に小さな文字で添える2〜3行の配列(各18文字以内、句点なし)。その写真の場面や使い心地の魅力を、具体的に、やわらかく';
+    if (job.template !== 'detail') {
+      want.point = '2枚目の寄りの写真に重ねる、素材やつくりの特徴のひとこと(18文字以内、句点なし、事実にあることだけ)';
+      want.point_lines = '特徴のひとことのすぐ下に小さな文字で添える2〜3行の配列(各18文字以内、句点なし)。素材、つくり、産地など、事実にあることだけで魅力を伝える';
+    }
   }
   const content = [];
   const cands = job.cands || [];
@@ -454,7 +464,7 @@ function writeText_(c, job) {
   try {
     out = claude_(c, content);
     if (out) {
-      const check = function (o) { return ngHits_([o.caption, o.copy, o.point, o.tagline, o.notice_title, (o.notice_lines || []).join(' ')].join(' ')); };
+      const check = function (o) { return ngHits_([o.caption, o.copy, o.point, o.tagline, lines_(o.copy_lines).join(' '), lines_(o.point_lines).join(' '), o.notice_title, (o.notice_lines || []).join(' ')].join(' ')); };
       if (check(out).length) {
         content.push({ type: 'text', text: '前回の案には禁止表現が含まれていました。禁止表現を一切使わずに書き直してください。' });
         out = claude_(c, content);
@@ -556,6 +566,8 @@ function createJob_(opt) {
     name: p['表示名'], variant: p['色・種類'], price: p['価格'], copy: text.copy,
     point: (job.template === 'slide' || job.template === 'zoom') ? String(text.point || '') : '',
     tagline: String(text.tagline || ''),
+    copy_lines: job.template === 'notice' ? [] : lines_(text.copy_lines),
+    point_lines: (job.template === 'slide' || job.template === 'zoom') ? lines_(text.point_lines) : [],
     ai_image: wearFile ? !/^実写/.test(wearFile.getName()) : false,
   };
   const files = { product_image: { url: p['全体写真URL'] } };
@@ -704,14 +716,18 @@ function ig_(c, method, path, params) {
     : UrlFetchApp.fetch(base, { method: 'post', payload: p, muteHttpExceptions: true });
   const body = JSON.parse(res.getContentText() || '{}');
   if (res.getResponseCode() >= 300 || body.error) {
-    throw new Error('Instagram: ' + ((body.error && body.error.message) || res.getContentText().slice(0, 300)));
+    const er = body.error || {};
+    throw new Error('Instagram: ' + (er.message || res.getContentText().slice(0, 300)) +
+      (er.code ? '(code ' + er.code + (er.error_subcode ? '/' + er.error_subcode : '') + ')' : ''));
   }
   return body;
 }
 
+/** 投稿に使うアカウントの指定。diagInstagram が、通った指定を IG_PATH に保存する */
+function igPath_() { return props_().getProperty('IG_PATH') || 'me'; }
+
 function finishPublish_(c, j, containerId) {
-  const igId = props_().getProperty('IG_USER_ID');
-  const media = ig_(c, 'post', igId + '/media_publish', { creation_id: containerId });
+  const media = ig_(c, 'post', igPath_() + '/media_publish', { creation_id: containerId });
   let link = '';
   try { link = ig_(c, 'get', media.id, { fields: 'permalink' }).permalink || ''; } catch (e) { /* 取得できなくても投稿は成功 */ }
   j.r['状態'] = ST.posted;
@@ -756,9 +772,7 @@ function publish(token, caption) {
 
   const c = conf_();
   try {
-    const igId = props_().getProperty('IG_USER_ID');
-    if (!igId) throw new Error('Instagramとの接続が未設定です');
-    const box = ig_(c, 'post', igId + '/media', { media_type: 'REELS', video_url: j.r['動画URL'], caption: caption, share_to_feed: 'true' });
+    const box = ig_(c, 'post', igPath_() + '/media', { media_type: 'REELS', video_url: j.r['動画URL'], caption: caption, share_to_feed: 'true' });
     for (let i = 0; i < 24; i++) {  // 最長4分ほど待つ
       Utilities.sleep(10000);
       const st = ig_(c, 'get', box.id, { fields: 'status_code,status' });
@@ -878,6 +892,38 @@ function testInstagram() {
   props_().setProperty('IG_USER_ID', String(me.user_id || me.id));
   props_().setProperty('IG_TOKEN_AT', String(now_().getTime() - 6 * 24 * 3600 * 1000));
   Logger.log('接続できました: @' + me.username + '(' + me.account_type + ')');
+}
+
+/**
+ * 投稿が通らないときの診断。実際には投稿しない(下書きの箱を作るところまで)。
+ * アカウントの指定のしかたを3通り試し、通ったものを保存する。
+ */
+function diagInstagram() {
+  const c = conf_();
+  const me = ig_(c, 'get', 'me', { fields: 'id,user_id,username,account_type' });
+  Logger.log('アカウント: @' + me.username + '(' + me.account_type + ')');
+  const tryIt = function (label, fn) {
+    try { const r = fn(); Logger.log('○ ' + label + ': ' + JSON.stringify(r).slice(0, 160)); return r; }
+    catch (e) { Logger.log('× ' + label + ': ' + e.message); return null; }
+  };
+  tryIt('投稿の許可があるか(投稿数の上限を読む)', function () { return ig_(c, 'get', 'me/content_publishing_limit', {}); });
+
+  const row = table_('log').rows.filter(function (r) { return r['動画URL']; }).pop();
+  if (!row) { Logger.log('試せる動画がありません。先に makeNow と動画づくりを済ませてください'); return; }
+  let found = '';
+  [['me', 'me'], ['user_id', String(me.user_id || '')], ['id', String(me.id || '')]].forEach(function (p) {
+    if (!p[1] || found) return;
+    const r = tryIt('下書きの箱を作る(指定: ' + p[0] + ')', function () {
+      return ig_(c, 'post', p[1] + '/media', { media_type: 'REELS', video_url: row['動画URL'], caption: 'test' });
+    });
+    if (r && r.id) found = p[1];
+  });
+  if (found) {
+    props_().setProperty('IG_PATH', found);
+    Logger.log('結果: 投稿の準備まで通りました。確認画面の「投稿する」をもう一度押してください');
+  } else {
+    Logger.log('結果: どの指定でも通りませんでした。上の × の文面を確認してください');
+  }
 }
 
 /** AIの接続を確かめる(スクリプト プロパティ ANTHROPIC_API_KEY を入れたあとに実行) */
