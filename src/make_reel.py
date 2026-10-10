@@ -200,6 +200,10 @@ def overlay(scene, cfg, base=None):
             y += 72
         if cfg.get("price"):
             spaced(d, (W / 2, y), cfg["price"], font(SERIF, 50), CHARCOAL + (255,), spacing=3)
+            y += 92
+        if cfg.get("tagline"):  # 価格の下に添えるひとこと
+            f = fit_font(d, cfg["tagline"], SERIF, 36, W - 240, spacing=5)
+            spaced(d, (W / 2, y), cfg["tagline"], f, (96, 91, 86, 255), spacing=5)
     if scene.get("ai_label"):
         ai_label(ImageDraw.Draw(layer))
     return layer

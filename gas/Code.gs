@@ -76,6 +76,7 @@ const CONF_ROWS = [
   ['Instagram API版', 'v26.0', '通常は変更不要'],
   ['確認画面URL', '', 'ウェブアプリとして公開したあとのURL(…/exec)'],
   ['ハッシュタグの上限', '5', 'Instagramで付けられるハッシュタグの数。超えた分は自動で削る'],
+  ['動画に価格を入れる', 'いいえ', '「はい」にすると、動画の最後の画面に価格が出る'],
   ['文章の方針', 'キャプションの本文は4〜6文。写真の場面から入り、素材、つくり、使う場面を具体的に伝える。商品説明にある事実を2〜3つ入れる。',
     'AIへの注文。長さ、内容、言い回しを、ここを書き換えるだけで調整できる'],
 ];
@@ -406,7 +407,7 @@ function writeText_(c, job) {
   ].filter(String).join('\n');
 
   const want = { caption: 'Instagramのキャプション',
-    tagline: '動画の中で商品名のすぐ下に小さく添える、気の利いた短いフレーズ(20文字以内、句点なし。商品の魅力を余韻のある言葉で。事実と写真から外れない)' };
+    tagline: '動画の最後に、商品名や価格のすぐ下に小さく添える、気の利いた短いフレーズ(20文字以内、句点なし。商品の魅力を余韻のある言葉で。事実と写真から外れない)' };
   if (job.template === 'notice' && !job.news) {
     want.notice_title = '画面に大きく出す見出し(12文字以内)';
     want.notice_lines = '見出しの下に出す2行(各16文字以内)の配列。テーマの事実だけを書く';
@@ -550,11 +551,24 @@ function createJob_(opt) {
 
   const p = job.product;
   const imgs = photos_(p);
+  // 3枚構成: 同じ写真が2回出ないように、まだ使っていない写真から順に割り当てる
+  const same = function (a, b) { return !!a && !!b && String(a).trim() === String(b).trim(); };
+  const taken = [p['全体写真URL']];
+  if (job.wearUrl) taken.push(job.wearUrl);
+  const fresh = function (prefer) {
+    const free = function (u) { return u && !taken.some(function (t) { return same(t, u); }); };
+    const u = free(prefer) ? prefer : imgs.filter(free)[0];
+    if (u) taken.push(u);
+    return u || '';
+  };
   const detailNo = Math.min(Math.max(1, parseInt(p['寄りの写真番号'], 10) || 2), imgs.length);
-  // 3枚構成: 寄りの写真は全テンプレートで使う。ディテール型は、別カットをもう1枚使う
-  job.detailUrl = imgs[detailNo - 1] || imgs[0];
-  if (job.template === 'detail') {
-    job.extraUrl = imgs.filter(function (u) { return u !== imgs[0] && u !== job.detailUrl; })[0] || imgs[0];
+  job.detailUrl = fresh(imgs[detailNo - 1]);
+  if (job.template === 'detail') job.extraUrl = fresh('');
+  if (!job.detailUrl || (job.template === 'detail' && !job.extraUrl)) {
+    // サイトの写真が足りない商品は、やむをえず同じ写真を使い、メモに残す
+    job.detailUrl = job.detailUrl || imgs[detailNo - 1] || imgs[0];
+    if (job.template === 'detail') job.extraUrl = job.extraUrl || imgs[0];
+    job.memo = (job.memo + ' サイトの写真が少ないため同じ写真を使用').trim();
   }
   job.cands = wear && wear.cands ? wear.cands : [];
   job.wearFile = wear && wear.file ? wear.file : null;
@@ -563,7 +577,7 @@ function createJob_(opt) {
 
   const config = {
     template: job.template, brand: c['ブランド名'] || 'Woolly',
-    name: p['表示名'], variant: p['色・種類'], price: p['価格'], copy: text.copy,
+    name: p['表示名'], variant: p['色・種類'], price: /^(はい|TRUE|yes)$/i.test(String(c['動画に価格を入れる'] || '').trim()) ? p['価格'] : '', copy: text.copy,
     point: (job.template === 'slide' || job.template === 'zoom') ? String(text.point || '') : '',
     tagline: String(text.tagline || ''),
     copy_lines: job.template === 'notice' ? [] : lines_(text.copy_lines),
