@@ -207,8 +207,12 @@ def scenes_for(cfg):
     name = {"overlay": "caption", "text": cfg["name"]}
     if t in ("slide", "zoom"):
         last = {"overlay": "panel"} if t == "slide" else name
+        # 2枚目には、素材やつくりの特徴のひとこと(あれば)を重ねる
+        middle = {"image": close}
+        if cfg.get("point"):
+            middle.update(overlay="copy", text=cfg["point"])
         return [{"image": cfg["wear_image"], "overlay": "copy", "text": cfg["copy"], "ai_label": ai},
-                {"image": close},
+                middle,
                 dict(image=whole, **last)]
     if t == "detail":
         return [dict(image=whole, **name),

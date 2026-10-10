@@ -65,6 +65,27 @@ function addRow_(key, o) {
     .appendRow(HEAD[key].map(function (h) { return o[h] === undefined ? '' : o[h]; }));
 }
 
+const CONF_ROWS = [
+  ['スタッフのメール', '', '投稿の確認メールを受け取る人。複数はカンマ区切り'],
+  ['管理者のメール', '', '失敗の通知を一緒に受け取る人'],
+  ['投稿曜日', '火,金', '投稿候補を作る曜日'],
+  ['サイトURL', 'https://woolly.co.jp', '商品情報を読むサイト'],
+  ['ブランド名', 'Woolly', '動画に入れる名前'],
+  ['基本ハッシュタグ', '#woolly #ウーリー #メリノウール', '毎回入れるハッシュタグ'],
+  ['AIモデル', 'claude-haiku-4-5-20251001', '文章づくりに使うモデル'],
+  ['Instagram API版', 'v26.0', '通常は変更不要'],
+  ['確認画面URL', '', 'ウェブアプリとして公開したあとのURL(…/exec)'],
+  ['文章の方針', 'キャプションの本文は4〜6文。写真の場面から入り、素材、つくり、使う場面を具体的に伝える。商品説明にある事実を2〜3つ入れる。',
+    'AIへの注文。長さ、内容、言い回しを、ここを書き換えるだけで調整できる'],
+];
+
+/** プログラムの更新で増えた設定の項目を、「設定」シートの下に足す */
+function ensureConf_() {
+  const sh = ss_().getSheetByName(SHEETS.conf);
+  const have = sh.getDataRange().getValues().map(function (r) { return r[0]; });
+  CONF_ROWS.forEach(function (r) { if (have.indexOf(r[0]) < 0) sh.appendRow(r); });
+}
+
 /** プログラムの更新で増えた列を、既存のシートの右端に足す */
 function ensureColumns_(key) {
   const sh = ss_().getSheetByName(SHEETS[key]);
@@ -123,17 +144,9 @@ function setup() {
       sh.setFrozenRows(1);
     });
     const me = Session.getActiveUser().getEmail();
-    [
-      ['スタッフのメール', '', '投稿の確認メールを受け取る人。複数はカンマ区切り'],
-      ['管理者のメール', me, '失敗の通知を一緒に受け取る人'],
-      ['投稿曜日', '火,金', '投稿候補を作る曜日'],
-      ['サイトURL', 'https://woolly.co.jp', '商品情報を読むサイト'],
-      ['ブランド名', 'Woolly', '動画に入れる名前'],
-      ['基本ハッシュタグ', '#woolly #ウーリー #メリノウール', '毎回入れるハッシュタグ'],
-      ['AIモデル', 'claude-haiku-4-5-20251001', '文章づくりに使うモデル'],
-      ['Instagram API版', 'v26.0', '通常は変更不要'],
-      ['確認画面URL', '', 'ウェブアプリとして公開したあとのURL(…/exec)'],
-    ].forEach(function (r) { ss.getSheetByName(SHEETS.conf).appendRow(r); });
+    CONF_ROWS.forEach(function (r) {
+      ss.getSheetByName(SHEETS.conf).appendRow(r[0] === '管理者のメール' ? [r[0], me, r[2]] : r);
+    });
     [
       ['産地', '毛布は、毛布の産地である大阪・忠岡町の工場でつくっています', ''],
       ['素材', 'ウールは「天然のエアコン」と言われる素材です', ''],
@@ -225,7 +238,7 @@ function syncProducts() {
     r['全体写真URL'] = imgs[0] || '';
     r['写真URL一覧'] = imgs.join('\n');
     r['商品ページURL'] = site + '/products/' + p.handle;
-    r['説明'] = strip_(p.body_html).slice(0, 600);
+    r['説明'] = strip_(p.body_html).slice(0, 1500);
     if (isNew) addRow_('prod', r); else saveRow_(t, r);
   });
   const live = {};
@@ -355,7 +368,7 @@ const RULES = [
   '・「日本一」「最高品質」など根拠のない最上級は使わない。',
   '・下の「事実」に書かれていない効果、数字、産地、素材は書かない。価格は書かない。',
   '・絵文字は使っても1〜2個まで。',
-  '・caption の構成: 1行目で場面や季節の実感 → 2〜4文の本文(事実を1つ入れる) → 空行 → 商品名 → 「プロフィールのリンクからご覧いただけます」 → 空行 → ハッシュタグ5〜8個(基本ハッシュタグを含める)。',
+  '・caption の構成: 1行目で場面や季節の実感 → 本文(長さと内容は下の「文章の方針」に従う) → 空行 → 商品名 → 「プロフィールのリンクからご覧いただけます」 → 空行 → ハッシュタグ5〜8個(基本ハッシュタグを含める)。',
 ].join('\n');
 
 /**
@@ -380,6 +393,7 @@ function writeText_(c, job) {
     want.notice_lines = '見出しの下に出す2行(各16文字以内)の配列。テーマの事実だけを書く';
   } else if (job.template !== 'notice') {
     want.copy = '動画に重ねるひとこと(15文字以内、句点で終える)';
+    if (job.template !== 'detail') want.point = '2枚目の寄りの写真に重ねる、素材やつくりの特徴のひとこと(18文字以内、句点なし、事実にあることだけ)';
   }
   const content = [];
   const cands = job.cands || [];
@@ -399,7 +413,7 @@ function writeText_(c, job) {
     show('着用シーン' + onCopy, webImage_(job.wearUrl));
   }
   if (p) show('実物写真', webImage_(p['全体写真URL']));
-  if (job.detailUrl) show('寄りの写真' + (job.template === 'detail' ? onCopy : ''), webImage_(job.detailUrl));
+  if (job.detailUrl) show('寄りの写真' + (job.template === 'detail' ? onCopy : (job.template === 'notice' ? '' : '(特徴のひとことが重なる写真)')), webImage_(job.detailUrl));
   if (job.extraUrl) show('別カットの写真', webImage_(job.extraUrl));
   const photoRules = content.length ? [
     '',
@@ -410,13 +424,14 @@ function writeText_(c, job) {
   ].join('\n') : '';
   content.push({
     type: 'text',
-    text: RULES + photoRules + '\n\n【事実】\n' + facts + '\n\n次のキーを持つJSONだけを返してください:\n' + JSON.stringify(want, null, 1),
+    text: RULES + photoRules + '\n\n【文章の方針】\n' + (c['文章の方針'] || '') + '\n\n【事実】\n' + facts + '\n\n次のキーを持つJSONだけを返してください:\n' + JSON.stringify(want, null, 1),
   });
 
   const name = p ? p['表示名'] : '';
   const fallback = {
     pick: 1,
     copy: 'あたたかく、心地よく。',
+    point: '',
     caption: (name ? name + '\n' : '') + 'プロフィールのリンクからご覧いただけます\n\n' + c['基本ハッシュタグ'],
     notice_title: job.fact ? String(job.factTheme || 'Woollyの話').slice(0, 12) : '',
     notice_lines: job.fact ? [String(job.fact).slice(0, 16), String(job.fact).slice(16, 32)].filter(String) : [],
@@ -425,7 +440,7 @@ function writeText_(c, job) {
   try {
     out = claude_(c, content);
     if (out) {
-      const check = function (o) { return ngHits_([o.caption, o.copy, o.notice_title, (o.notice_lines || []).join(' ')].join(' ')); };
+      const check = function (o) { return ngHits_([o.caption, o.copy, o.point, o.notice_title, (o.notice_lines || []).join(' ')].join(' ')); };
       if (check(out).length) {
         content.push({ type: 'text', text: '前回の案には禁止表現が含まれていました。禁止表現を一切使わずに書き直してください。' });
         out = claude_(c, content);
@@ -457,6 +472,7 @@ function recentHandles_() {
  */
 function createJob_(opt) {
   ensureColumns_('prod');
+  ensureConf_();
   const c = conf_();
   const pillar = PILLARS[opt.pillarIdx % PILLARS.length];
   const excl = opt.excludeMaterials || [];
@@ -523,6 +539,7 @@ function createJob_(opt) {
   const config = {
     template: job.template, brand: c['ブランド名'] || 'Woolly',
     name: p['表示名'], variant: p['色・種類'], price: p['価格'], copy: text.copy,
+    point: (job.template === 'slide' || job.template === 'zoom') ? String(text.point || '') : '',
     ai_image: wearFile ? !/^実写/.test(wearFile.getName()) : false,
   };
   const files = { product_image: { url: p['全体写真URL'] } };
