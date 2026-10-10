@@ -13,7 +13,7 @@ concurrency: reel
 
 jobs:
   run:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
       WEBAPP_URL: ${{ secrets.WEBAPP_URL }}
@@ -27,8 +27,7 @@ jobs:
         if: steps.check.outputs.has_job == 'true'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg fonts-noto-cjk
-          pip install -q pillow
+          sudo apt-get install -y -qq ffmpeg fonts-noto-cjk python3-pil
       - name: 動画をつくる
         if: steps.check.outputs.has_job == 'true'
         run: python3 src/run_job.py
