@@ -17,6 +17,7 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+import time
 import traceback
 import urllib.parse
 import urllib.request
@@ -34,9 +35,17 @@ KEEP_DAYS = 30
 
 
 def call(action, **params):
+    """Google側に問い合わせる。Googleが一時的に遅い・不調なときは、間をあけて3回まで試す"""
     q = urllib.parse.urlencode(dict(action=action, key=KEY, **params))
-    with urllib.request.urlopen(f"{URL}?{q}", timeout=120) as r:
-        return json.loads(r.read().decode("utf-8"))
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(f"{URL}?{q}", timeout=90) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except Exception as e:
+            if attempt == 2:
+                raise
+            print(f"Google側の応答がありません({e})。30秒後にもう一度試します", file=sys.stderr)
+            time.sleep(30)
 
 
 def report(payload):
@@ -107,7 +116,12 @@ def main():
     if not URL or not KEY:
         sys.exit("WEBAPP_URL と WEBAPP_KEY を設定してください")
     if "--check" in sys.argv:
-        n = call("peek").get("pending", 0)
+        try:
+            n = call("peek").get("pending", 0)
+        except Exception as e:
+            # Googleの一時的な不調。失敗扱いにせず、次の回(2時間後)にまた見にいく
+            print(f"::warning::Google側に接続できませんでした。次の回にもう一度確認します({e})")
+            n = 0
         print(f"注文: {n}件")
         if os.environ.get("GITHUB_OUTPUT"):
             with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
