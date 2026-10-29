@@ -19,7 +19,7 @@ jobs:
       WEBAPP_URL: ${{ secrets.WEBAPP_URL }}
       WEBAPP_KEY: ${{ secrets.WEBAPP_KEY }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: 注文があるか確認
         id: check
         run: python3 src/run_job.py --check
